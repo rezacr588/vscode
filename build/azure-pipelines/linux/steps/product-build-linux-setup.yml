@@ -155,7 +155,7 @@ steps:
   # so that they don't depend on GitHub's rate limits, which can outlast the download's retries (GH-429)
   - task: Cache@2
     inputs:
-      key: '"chromium-files-v2" | cgmanifest.json'
+      key: '"chromium-files-v3" | cgmanifest.json'
       path: .build/chromium-files
     displayName: Restore Chromium build scripts
     retryCountOnTaskFailure: 2
