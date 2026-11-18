@@ -151,6 +151,16 @@ steps:
     ${{ if eq(parameters.VSCODE_WORKSPACE_IMAGE, 'build') }}:
       condition: and(succeeded(), eq(variables['WORKSPACE_IMAGE_USED'], 'true'))
 
+  # The Chromium build scripts that setup-env.sh and the deb and rpm packaging download (see build/lib/chromiumSource.ts),
+  # so that they don't depend on GitHub's rate limits, which can outlast the download's retries (GH-429)
+  - task: Cache@2
+    inputs:
+      key: '"chromium-files" | cgmanifest.json'
+      path: .build/chromium-files
+    displayName: Restore Chromium build scripts
+    retryCountOnTaskFailure: 2
+    continueOnError: true
+
   - script: |
       set -e
 

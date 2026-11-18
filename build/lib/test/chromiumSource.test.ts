@@ -8,7 +8,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { suite, test } from 'node:test';
-import { downloadChromiumFile, getChromiumVersion, type HttpGetResult } from '../chromiumSource.ts';
+import { CHROMIUM_BUILD_FILES, downloadChromiumFile, getChromiumVersion, type HttpGetResult } from '../chromiumSource.ts';
 
 const script = '#!/usr/bin/env python3\nprint("hello")\n';
 const rateLimited: HttpGetResult = { ok: false, error: 'curl failed (status 22): The requested URL returned error: 429' };
@@ -31,6 +31,7 @@ suite('chromiumSource', () => {
 		const requests: string[] = [];
 		downloadChromiumFile('tools/clang/scripts/update.py', destination, {
 			version: '1.2.3.4',
+			cacheDir: false,
 			token: 'secret',
 			retryDelaysMs: [],
 			httpGet: (url, headers) => {
@@ -46,6 +47,7 @@ suite('chromiumSource', () => {
 		const requests: string[] = [];
 		downloadChromiumFile('a/b.pl', destination, {
 			version: '1.2.3.4',
+			cacheDir: false,
 			token: 'secret',
 			retryDelaysMs: [],
 			httpGet: (url, headers) => {
@@ -66,6 +68,7 @@ suite('chromiumSource', () => {
 		const requests: string[] = [];
 		downloadChromiumFile('a/b.pl', destination, {
 			version: '1.2.3.4',
+			cacheDir: false,
 			token: '',
 			retryDelaysMs: [0],
 			httpGet: url => {
@@ -84,6 +87,7 @@ suite('chromiumSource', () => {
 		let calls = 0;
 		assert.throws(() => downloadChromiumFile('a/b.pl', destination, {
 			version: '1.2.3.4',
+			cacheDir: false,
 			token: 'secret',
 			retryDelaysMs: [0, 0],
 			httpGet: () => {
@@ -93,5 +97,58 @@ suite('chromiumSource', () => {
 		}), (error: Error) => error.message.includes('Cannot download Chromium 1.2.3.4 a/b.pl') && error.message.includes('Attempt 3/3') && error.message.includes('api.github.com'));
 		assert.strictEqual(calls, 12);
 		assert.strictEqual(fs.existsSync(destination), false);
+	}));
+
+	test('uses a cached file of the same version without downloading', () => withTempFile(destination => {
+		const cacheDir = path.join(path.dirname(destination), 'cache');
+		fs.mkdirSync(path.join(cacheDir, '1.2.3.4', 'a'), { recursive: true });
+		fs.writeFileSync(path.join(cacheDir, '1.2.3.4', 'a', 'b.pl'), script);
+		downloadChromiumFile('a/b.pl', destination, {
+			version: '1.2.3.4',
+			cacheDir,
+			retryDelaysMs: [],
+			httpGet: () => assert.fail('downloads despite the cache'),
+		});
+		assert.strictEqual(fs.readFileSync(destination, 'utf8'), script);
+	}));
+
+	test('ignores a cached file of another version or an invalid one, and caches every build file it downloads', () => withTempFile(destination => {
+		const cacheDir = path.join(path.dirname(destination), 'cache');
+		fs.mkdirSync(path.join(cacheDir, '1.2.3.3', 'third_party', 'dpkg-shlibdeps'), { recursive: true });
+		fs.writeFileSync(path.join(cacheDir, '1.2.3.3', CHROMIUM_BUILD_FILES[1]), script);
+		fs.mkdirSync(path.join(cacheDir, '1.2.3.4', 'third_party', 'dpkg-shlibdeps'), { recursive: true });
+		fs.writeFileSync(path.join(cacheDir, '1.2.3.4', CHROMIUM_BUILD_FILES[1]), '429: Too Many Requests');
+		const requested: string[] = [];
+		downloadChromiumFile(CHROMIUM_BUILD_FILES[1], destination, {
+			version: '1.2.3.4',
+			token: 'secret',
+			cacheDir,
+			retryDelaysMs: [],
+			httpGet: url => {
+				requested.push(new URL(url).pathname.split('/').pop()!);
+				return { ok: true, body: Buffer.from(script) };
+			},
+		});
+		assert.strictEqual(fs.readFileSync(destination, 'utf8'), script);
+		assert.deepStrictEqual(requested, ['dpkg-shlibdeps.pl', 'update.py']);
+		for (const file of CHROMIUM_BUILD_FILES) {
+			assert.strictEqual(fs.readFileSync(path.join(cacheDir, '1.2.3.4', file), 'utf8'), script);
+		}
+	}));
+
+	test('a build file that can\'t be cached along doesn\'t fail the download', () => withTempFile(destination => {
+		const cacheDir = path.join(path.dirname(destination), 'cache');
+		let calls = 0;
+		downloadChromiumFile(CHROMIUM_BUILD_FILES[0], destination, {
+			version: '1.2.3.4',
+			token: 'secret',
+			cacheDir,
+			retryDelaysMs: [0, 0],
+			httpGet: () => ++calls === 1 ? { ok: true, body: Buffer.from(script) } : rateLimited,
+		});
+		assert.strictEqual(fs.readFileSync(destination, 'utf8'), script);
+		// one attempt per source for the other file, without the retries
+		assert.strictEqual(calls, 1 + 4);
+		assert.strictEqual(fs.existsSync(path.join(cacheDir, '1.2.3.4', CHROMIUM_BUILD_FILES[1])), false);
 	}));
 });

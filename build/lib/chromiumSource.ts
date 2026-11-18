@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { spawnSync } from 'child_process';
-import { writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import path from 'path';
 import manifests from '../../cgmanifest.json' with { type: 'json' };
 
 export type HttpGetResult = { readonly ok: true; readonly body: Buffer } | { readonly ok: false; readonly error: string };
@@ -18,6 +19,18 @@ interface ChromiumFileSource {
 }
 
 const DEFAULT_RETRY_DELAYS_MS = [10_000, 30_000, 60_000];
+
+/**
+ * The Chromium files that the build downloads. Filling the cache with one of them also fetches the others, so that a
+ * cache saved by any job (build/azure-pipelines/linux/steps/product-build-linux-setup.yml) serves every job.
+ */
+export const CHROMIUM_BUILD_FILES: readonly string[] = ['tools/clang/scripts/update.py', 'third_party/dpkg-shlibdeps/dpkg-shlibdeps.pl'];
+
+/**
+ * The files of earlier downloads, by Chromium version, which the product build restores from a pipeline cache so that
+ * its jobs don't depend on GitHub's rate limits (GH-429).
+ */
+const DEFAULT_CACHE_DIR = path.join(import.meta.dirname, '..', '..', '.build', 'chromium-files');
 
 export function getChromiumVersion(): string {
 	const chromiumManifest = manifests.registrations.find(registration => {
@@ -76,17 +89,61 @@ export interface DownloadChromiumFileOptions {
 	readonly retryDelaysMs?: readonly number[];
 	/** Rejects error pages served with a success status. Defaults to requiring a `#!` script header. */
 	readonly validate?: (content: Buffer) => boolean;
+	/** Where downloaded files are kept by version, and read from first. `false` disables the cache. */
+	readonly cacheDir?: string | false;
 }
 
 /**
  * Downloads a file from the Chromium source tree at the version pinned in cgmanifest.json, trying
  * the GitHub API, the GitHub raw host and Chromium's Gitiles host, and retrying the set with backoff.
+ * A file of the same version in the cache is used instead, and a downloaded file is added to it,
+ * together with the other files of CHROMIUM_BUILD_FILES.
  */
 export function downloadChromiumFile(filePath: string, destination: string, options: DownloadChromiumFileOptions = {}): void {
 	const version = options.version ?? getChromiumVersion();
-	const httpGet = options.httpGet ?? curlGet;
-	const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
 	const validate = options.validate ?? (content => content.subarray(0, 2).toString('utf8') === '#!');
+	const cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR;
+	const cached = cacheDir ? readCachedFile(cacheDir, version, filePath, validate) : undefined;
+	if (cached) {
+		writeFileSync(destination, cached);
+		console.log(`Using Chromium ${version} ${filePath} from the cache`);
+		return;
+	}
+
+	const content = fetchChromiumFile(filePath, version, options, validate, options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS);
+	writeFileSync(destination, content);
+	if (cacheDir) {
+		writeCachedFile(cacheDir, version, filePath, content);
+		// One attempt per source: the cache only saves time, so a failure here doesn't matter
+		for (const other of CHROMIUM_BUILD_FILES) {
+			if (other !== filePath && !readCachedFile(cacheDir, version, other, validate)) {
+				try {
+					writeCachedFile(cacheDir, version, other, fetchChromiumFile(other, version, options, validate, []));
+				} catch (err) {
+					console.log(`Not caching Chromium ${version} ${other}: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`);
+				}
+			}
+		}
+	}
+}
+
+function readCachedFile(cacheDir: string, version: string, filePath: string, validate: (content: Buffer) => boolean): Buffer | undefined {
+	const file = path.join(cacheDir, version, filePath);
+	if (!existsSync(file)) {
+		return undefined;
+	}
+	const content = readFileSync(file);
+	return validate(content) ? content : undefined;
+}
+
+function writeCachedFile(cacheDir: string, version: string, filePath: string, content: Buffer): void {
+	const file = path.join(cacheDir, version, filePath);
+	mkdirSync(path.dirname(file), { recursive: true });
+	writeFileSync(file, content);
+}
+
+function fetchChromiumFile(filePath: string, version: string, options: DownloadChromiumFileOptions, validate: (content: Buffer) => boolean, retryDelaysMs: readonly number[]): Buffer {
+	const httpGet = options.httpGet ?? curlGet;
 	const sources = getSources(filePath, version, options.token ?? process.env['GITHUB_TOKEN']);
 	const errors: string[] = [];
 
@@ -97,9 +154,8 @@ export function downloadChromiumFile(filePath: string, destination: string, opti
 			if (result.ok) {
 				const content = source.decode(result.body);
 				if (validate(content)) {
-					writeFileSync(destination, content);
 					console.log(`Downloaded Chromium ${version} ${filePath} from ${source.name}`);
-					return;
+					return content;
 				}
 				error = 'downloaded content is not the expected file';
 			} else {
