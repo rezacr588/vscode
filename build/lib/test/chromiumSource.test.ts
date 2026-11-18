@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -103,6 +104,7 @@ suite('chromiumSource', () => {
 		const cacheDir = path.join(path.dirname(destination), 'cache');
 		fs.mkdirSync(path.join(cacheDir, '1.2.3.4', 'a'), { recursive: true });
 		fs.writeFileSync(path.join(cacheDir, '1.2.3.4', 'a', 'b.pl'), script);
+		fs.writeFileSync(path.join(cacheDir, '1.2.3.4', 'a', 'b.pl.sha256'), createHash('sha256').update(script).digest('hex'));
 		downloadChromiumFile('a/b.pl', destination, {
 			version: '1.2.3.4',
 			cacheDir,
@@ -133,6 +135,7 @@ suite('chromiumSource', () => {
 		assert.deepStrictEqual(requested, ['dpkg-shlibdeps.pl', 'update.py']);
 		for (const file of CHROMIUM_BUILD_FILES) {
 			assert.strictEqual(fs.readFileSync(path.join(cacheDir, '1.2.3.4', file), 'utf8'), script);
+			assert.strictEqual(fs.readFileSync(path.join(cacheDir, '1.2.3.4', `${file}.sha256`), 'utf8'), createHash('sha256').update(script).digest('hex'));
 		}
 	}));
 
@@ -150,5 +153,31 @@ suite('chromiumSource', () => {
 		// one attempt per source for the other file, without the retries
 		assert.strictEqual(calls, 1 + 4);
 		assert.strictEqual(fs.existsSync(path.join(cacheDir, '1.2.3.4', CHROMIUM_BUILD_FILES[1])), false);
+	}));
+
+	test('a cached file whose content doesn\'t match its SHA-256, or that has none, is downloaded again', () => withTempFile(destination => {
+		const cacheDir = path.join(path.dirname(destination), 'cache');
+		const tampered = '#!/usr/bin/env perl\nsystem("curl evil");\n';
+		for (const [file, hash] of [['a/b.pl', createHash('sha256').update(script).digest('hex')], ['a/c.pl', undefined]] as const) {
+			fs.mkdirSync(path.join(cacheDir, '1.2.3.4', 'a'), { recursive: true });
+			fs.writeFileSync(path.join(cacheDir, '1.2.3.4', file), tampered);
+			if (hash) {
+				fs.writeFileSync(path.join(cacheDir, '1.2.3.4', `${file}.sha256`), hash);
+			}
+			let calls = 0;
+			downloadChromiumFile(file, destination, {
+				version: '1.2.3.4',
+				token: 'secret',
+				cacheDir,
+				retryDelaysMs: [],
+				httpGet: url => {
+					calls += url.includes(file) ? 1 : 0;
+					return { ok: true, body: Buffer.from(script) };
+				},
+			});
+			assert.strictEqual(calls, 1, file);
+			assert.strictEqual(fs.readFileSync(destination, 'utf8'), script, file);
+			assert.strictEqual(fs.readFileSync(path.join(cacheDir, '1.2.3.4', file), 'utf8'), script, file);
+		}
 	}));
 });

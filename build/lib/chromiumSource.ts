@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import manifests from '../../cgmanifest.json' with { type: 'json' };
@@ -127,12 +128,23 @@ export function downloadChromiumFile(filePath: string, destination: string, opti
 	}
 }
 
+// The SHA-256 of a cached file, recorded when it was downloaded, guards against a damaged cache. A file without one, or
+// whose content doesn't match it, counts as missing. The cache's own scope guards against untrusted writers: a pipeline
+// cache that a pull request or another branch saves is never restored on main.
+function sha256(content: Buffer): string {
+	return createHash('sha256').update(content).digest('hex');
+}
+
 function readCachedFile(cacheDir: string, version: string, filePath: string, validate: (content: Buffer) => boolean): Buffer | undefined {
 	const file = path.join(cacheDir, version, filePath);
-	if (!existsSync(file)) {
+	if (!existsSync(file) || !existsSync(`${file}.sha256`)) {
 		return undefined;
 	}
 	const content = readFileSync(file);
+	if (readFileSync(`${file}.sha256`, 'utf8').trim() !== sha256(content)) {
+		console.log(`Ignoring the cached Chromium ${version} ${filePath}: its content doesn't match its SHA-256`);
+		return undefined;
+	}
 	return validate(content) ? content : undefined;
 }
 
@@ -140,6 +152,7 @@ function writeCachedFile(cacheDir: string, version: string, filePath: string, co
 	const file = path.join(cacheDir, version, filePath);
 	mkdirSync(path.dirname(file), { recursive: true });
 	writeFileSync(file, content);
+	writeFileSync(`${file}.sha256`, sha256(content));
 }
 
 function fetchChromiumFile(filePath: string, version: string, options: DownloadChromiumFileOptions, validate: (content: Buffer) => boolean, retryDelaysMs: readonly number[]): Buffer {
