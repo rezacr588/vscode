@@ -9,7 +9,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { suite, test } from 'node:test';
-import { CHROMIUM_BUILD_FILES, downloadChromiumFile, getChromiumVersion, type HttpGetResult } from '../chromiumSource.ts';
+import { CHROMIUM_BUILD_FILES, downloadChromiumFile, getChromiumVersion, prefetchChromiumBuildFiles, type HttpGetResult } from '../chromiumSource.ts';
 
 const script = '#!/usr/bin/env python3\nprint("hello")\n';
 const rateLimited: HttpGetResult = { ok: false, error: 'curl failed (status 22): The requested URL returned error: 429' };
@@ -178,6 +178,23 @@ suite('chromiumSource', () => {
 			assert.strictEqual(calls, 1, file);
 			assert.strictEqual(fs.readFileSync(destination, 'utf8'), script, file);
 			assert.strictEqual(fs.readFileSync(path.join(cacheDir, '1.2.3.4', file), 'utf8'), script, file);
+		}
+	}));
+
+	test('prefetching adds the missing build scripts once, and never throws', () => withTempFile(destination => {
+		const cacheDir = path.join(path.dirname(destination), 'cache');
+		let calls = 0;
+		prefetchChromiumBuildFiles({ version: '1.2.3.4', token: 'secret', cacheDir, httpGet: () => { calls++; return rateLimited; } });
+		assert.strictEqual(calls, 4 * CHROMIUM_BUILD_FILES.length);
+		assert.strictEqual(fs.existsSync(cacheDir), false);
+
+		calls = 0;
+		const options = { version: '1.2.3.4', token: 'secret', cacheDir, httpGet: () => { calls++; return { ok: true, body: Buffer.from(script) } as HttpGetResult; } };
+		prefetchChromiumBuildFiles(options);
+		prefetchChromiumBuildFiles(options);
+		assert.strictEqual(calls, CHROMIUM_BUILD_FILES.length);
+		for (const file of CHROMIUM_BUILD_FILES) {
+			assert.strictEqual(fs.readFileSync(path.join(cacheDir, '1.2.3.4', file), 'utf8'), script);
 		}
 	}));
 });

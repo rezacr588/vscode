@@ -37,6 +37,9 @@ cat > "$HOME/.gyp/include.gypi" << 'EOF'
 }
 EOF
 
+# Fill the cache of the Chromium build scripts that the job restores, if it lacks them (see build/lib/chromiumSource.ts)
+node -e 'import { prefetchChromiumBuildFiles } from "./build/lib/chromiumSource.ts"; prefetchChromiumBuildFiles();'
+
 if [ "$npm_config_arch" == "x64" ]; then
   # Download clang based on chromium revision used by vscode. Fetch Chromium's
   # update script to a file first, trying the GitHub API before the raw host,

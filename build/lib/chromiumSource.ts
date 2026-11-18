@@ -135,6 +135,27 @@ function sha256(content: Buffer): string {
 	return createHash('sha256').update(content).digest('hex');
 }
 
+/**
+ * Adds the Chromium build scripts that the cache lacks to it, with one attempt per source, so that every job that
+ * restores the cache also has something to save (Cache@2 fails to save a folder that doesn't exist). Never throws.
+ */
+export function prefetchChromiumBuildFiles(options: DownloadChromiumFileOptions = {}): void {
+	const cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR;
+	if (!cacheDir) {
+		return;
+	}
+	const validate = options.validate ?? (content => content.subarray(0, 2).toString('utf8') === '#!');
+	for (const file of CHROMIUM_BUILD_FILES) {
+		try {
+			const version = options.version ?? getChromiumVersion();
+			if (!readCachedFile(cacheDir, version, file, validate)) {
+				writeCachedFile(cacheDir, version, file, fetchChromiumFile(file, version, options, validate, []));
+			}
+		} catch (err) {
+			console.log(`Not caching Chromium ${file}: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`);
+		}
+	}
+}
 function readCachedFile(cacheDir: string, version: string, filePath: string, validate: (content: Buffer) => boolean): Buffer | undefined {
 	const file = path.join(cacheDir, version, filePath);
 	if (!existsSync(file) || !existsSync(`${file}.sha256`)) {
